@@ -751,53 +751,13 @@ async function extractPropertyDetails(page, lead, index) {
     if (await propertyLink.isVisible({ timeout: 2000 }).catch(() => false)) {
       // Click on the property link
       await propertyLink.click();
-      await page.waitForTimeout(500);
       
       let propertyId = null;
       let propertyAgent = null;
       
-      // Check what appeared after clicking:
-      // Option 1: A modal (#quickDisplay_modal) - real property exists
-      // Option 2: An editable input field - property doesn't exist (was reserved/deleted)
-      
-      // First, check if an input field appeared (indicates no real property)
-      const editableInputAppeared = await page.evaluate(() => {
-        // Look for a focused input or a recently visible input in the property area
-        const activeElement = document.activeElement;
-        if (activeElement && activeElement.tagName === 'INPUT' && activeElement.type === 'text') {
-          return true;
-        }
-        // Also check for any visible text input that might have appeared
-        const inputs = document.querySelectorAll('input[type="text"]:not([style*="display: none"])');
-        for (const input of inputs) {
-          const rect = input.getBoundingClientRect();
-          // Check if input is visible and in a reasonable position (not hidden)
-          if (rect.width > 50 && rect.height > 10 && rect.top > 0) {
-            // Check if this input appeared near where we clicked (property column area)
-            const style = window.getComputedStyle(input);
-            if (style.display !== 'none' && style.visibility !== 'hidden') {
-              return true;
-            }
-          }
-        }
-        return false;
-      });
-      
-      if (editableInputAppeared) {
-        // No real property - an editable input appeared instead of modal
-        logger.debug(`Property "${propertyAddress}" is editable (no real property) for lead ${index + 1}`);
-        // Close/blur the input by pressing Escape
-        await page.keyboard.press('Escape');
-        await page.waitForTimeout(200);
-        return {
-          ...lead,
-          propertyId: null,
-          propertyAgent: lead._agentName
-        };
-      }
-      
       try {
-        // Wait for modal to be visible (short timeout)
+        // Wait for modal to be visible
+        // If modal doesn't appear, it means an editable input appeared instead (no real property)
         await page.waitForSelector('#quickDisplay_modal', { state: 'visible', timeout: 2000 });
         
         // Get text from modal - content is usually in an iframe
