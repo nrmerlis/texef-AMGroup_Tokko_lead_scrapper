@@ -40,6 +40,19 @@ export async function createBrowser() {
 }
 
 /**
+ * Direct CSS selectors for Tokko login page
+ * These are more reliable than Smart Selector for login
+ */
+const LOGIN_SELECTORS = {
+  username: '#username',
+  password: '#password',
+  termsCheckbox: '#agreeterms',
+  privacyCheckbox: '#agreepolicy',
+  // The login button is a div with "Acceder" text, not a traditional button
+  loginButton: 'div[cursor="pointer"]:has-text("Acceder"), .login-button, button:has-text("Acceder"), [role="button"]:has-text("Acceder")',
+};
+
+/**
  * Login to Tokko Broker
  * @param {Page} page - Playwright page with Smart Selector
  * @returns {Promise<boolean>} - True if login successful
@@ -57,65 +70,124 @@ export async function loginToTokko(page) {
     // Wait a bit for dynamic content to load
     await page.waitForTimeout(3000);
 
-    logger.info('Querying login form elements...');
-    const response = await page.queryElements(LOGIN_QUERY);
+    logger.info('Filling login form with direct selectors...');
 
-    // Fill email
-    if (response.email_input) {
-      await response.email_input.fill(config.tokko.email);
-      logger.debug('Email filled');
+    // Fill username/email using direct selector
+    const usernameInput = await page.$(LOGIN_SELECTORS.username);
+    if (usernameInput) {
+      await page.fill(LOGIN_SELECTORS.username, config.tokko.email);
+      logger.debug('Username/email filled');
     } else {
-      logger.warn('Email input not found');
+      logger.warn('Username input not found, trying Smart Selector fallback...');
+      const response = await page.queryElements(LOGIN_QUERY);
+      if (response.email_input) {
+        await response.email_input.fill(config.tokko.email);
+        logger.debug('Email filled via Smart Selector');
+      } else {
+        throw new Error('Could not find username/email input field');
+      }
     }
 
-    // Fill password
-    if (response.password_input) {
-      await response.password_input.fill(config.tokko.password);
+    // Fill password using direct selector
+    const passwordInput = await page.$(LOGIN_SELECTORS.password);
+    if (passwordInput) {
+      await page.fill(LOGIN_SELECTORS.password, config.tokko.password);
       logger.debug('Password filled');
     } else {
-      logger.warn('Password input not found');
+      logger.warn('Password input not found, trying Smart Selector fallback...');
+      const response = await page.queryElements(LOGIN_QUERY);
+      if (response.password_input) {
+        await response.password_input.fill(config.tokko.password);
+        logger.debug('Password filled via Smart Selector');
+      } else {
+        throw new Error('Could not find password input field');
+      }
     }
 
-    // Accept terms if checkbox exists
-    if (response.terms_checkbox) {
-      try {
-        const isChecked = await response.terms_checkbox.isChecked().catch(() => false);
+    // Check terms checkbox if not already checked
+    try {
+      const termsCheckbox = await page.$(LOGIN_SELECTORS.termsCheckbox);
+      if (termsCheckbox) {
+        const isChecked = await page.isChecked(LOGIN_SELECTORS.termsCheckbox);
         if (!isChecked) {
-          await response.terms_checkbox.click();
+          await page.click(LOGIN_SELECTORS.termsCheckbox);
           logger.debug('Terms checkbox clicked');
+        } else {
+          logger.debug('Terms checkbox already checked');
         }
-      } catch (e) {
-        logger.debug('Could not check terms checkbox, trying click anyway');
-        await response.terms_checkbox.click().catch(() => {});
       }
-    } else {
-      logger.debug('Terms checkbox not found (may not be required)');
+    } catch (e) {
+      logger.debug('Could not interact with terms checkbox', { error: e.message });
     }
 
-    // Accept privacy policy if checkbox exists
-    if (response.privacy_checkbox) {
-      try {
-        const isChecked = await response.privacy_checkbox.isChecked().catch(() => false);
+    // Check privacy checkbox if not already checked
+    try {
+      const privacyCheckbox = await page.$(LOGIN_SELECTORS.privacyCheckbox);
+      if (privacyCheckbox) {
+        const isChecked = await page.isChecked(LOGIN_SELECTORS.privacyCheckbox);
         if (!isChecked) {
-          await response.privacy_checkbox.click();
+          await page.click(LOGIN_SELECTORS.privacyCheckbox);
           logger.debug('Privacy checkbox clicked');
+        } else {
+          logger.debug('Privacy checkbox already checked');
         }
-      } catch (e) {
-        logger.debug('Could not check privacy checkbox, trying click anyway');
-        await response.privacy_checkbox.click().catch(() => {});
       }
-    } else {
-      logger.debug('Privacy checkbox not found (may not be required)');
+    } catch (e) {
+      logger.debug('Could not interact with privacy checkbox', { error: e.message });
     }
 
     // Small delay before clicking login
     await page.waitForTimeout(500);
 
-    // Click login button
-    if (response.login_button) {
-      await response.login_button.click();
-      logger.info('Login button clicked, waiting for navigation...');
-    } else {
+    // Click login button - try multiple selectors since it's a div, not a button
+    logger.info('Looking for login button...');
+    let loginClicked = false;
+
+    // Try to find by text content "Acceder"
+    const accederButton = page.locator('text=Acceder').first();
+    if (await accederButton.isVisible().catch(() => false)) {
+      await accederButton.click();
+      loginClicked = true;
+      logger.info('Login button clicked (text=Acceder)');
+    }
+
+    // Fallback: try other selectors
+    if (!loginClicked) {
+      const selectors = [
+        'div:has-text("Acceder")',
+        '[class*="login"]',
+        '[class*="submit"]',
+        'button[type="submit"]',
+        'input[type="submit"]',
+      ];
+      
+      for (const selector of selectors) {
+        try {
+          const el = page.locator(selector).first();
+          if (await el.isVisible().catch(() => false)) {
+            await el.click();
+            loginClicked = true;
+            logger.info(`Login button clicked (${selector})`);
+            break;
+          }
+        } catch (e) {
+          continue;
+        }
+      }
+    }
+
+    // Last resort: Smart Selector
+    if (!loginClicked) {
+      logger.warn('Direct selectors failed, trying Smart Selector for login button...');
+      const response = await page.queryElements(LOGIN_QUERY);
+      if (response.login_button) {
+        await response.login_button.click();
+        loginClicked = true;
+        logger.info('Login button clicked via Smart Selector');
+      }
+    }
+
+    if (!loginClicked) {
       throw new Error('Login button not found on page');
     }
 
