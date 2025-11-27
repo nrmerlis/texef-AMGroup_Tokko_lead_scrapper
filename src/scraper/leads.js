@@ -516,6 +516,138 @@ async function scrapeVisibleLeads(page, targetStatus = null) {
 }
 
 /**
+ * Extract contact details by clicking on the contact name and reading the tooltip/popover
+ * @param {Page} page - Playwright page
+ * @param {Object} lead - Lead object with contactName
+ * @param {number} index - Index for logging
+ * @returns {Promise<Object>} - Contact info with email, phone, cellPhone
+ */
+async function extractContactDetails(page, lead, index) {
+  try {
+    const contactName = lead.contactName?.trim();
+    if (!contactName) {
+      logger.debug(`No contact name for lead ${index + 1}`);
+      return { email: null, phone: null, cellPhone: null };
+    }
+
+    // The contact is in a div with class "class_contact_tooltip" inside a td with class "leads-contact-td"
+    // Structure: <td class="leads-contact-td"><div class="class_contact_tooltip">Name (Agent)</div></td>
+    const contactElement = page.locator(`.class_contact_tooltip:has-text("${contactName}")`).first();
+    
+    // Scroll to the element first
+    try {
+      await contactElement.scrollIntoViewIfNeeded({ timeout: 3000 });
+      await page.waitForTimeout(200);
+    } catch (e) {
+      // Element might not exist
+    }
+
+    if (await contactElement.isVisible({ timeout: 2000 }).catch(() => false)) {
+      // Click on the contact name to open tooltip/popover
+      await contactElement.click();
+      
+      let email = null;
+      let phone = null;
+      let cellPhone = null;
+
+      try {
+        // Wait for the qTip tooltip to appear
+        // Tokko uses qTip (jQuery UI Tooltip) with class "contact_ttip" or "ui-tooltip"
+        await page.waitForTimeout(800);
+        
+        // The tooltip uses qTip - look for .ui-tooltip, .qtip, or .contact_ttip
+        const popoverSelectors = [
+          '.contact_ttip',
+          '.ui-tooltip.qtip',
+          '.ui-tooltip',
+          '.qtip',
+        ];
+        
+        let popoverText = '';
+        
+        // Try to find the qTip tooltip content
+        for (const selector of popoverSelectors) {
+          const popover = page.locator(selector).first();
+          if (await popover.isVisible({ timeout: 500 }).catch(() => false)) {
+            popoverText = await popover.innerText().catch(() => '');
+            if (popoverText && (popoverText.includes('@') || popoverText.includes('+'))) {
+              logger.debug(`Found qTip tooltip with selector: ${selector}`);
+              break;
+            }
+          }
+        }
+        
+        // Fallback: look for any floating element with contact info
+        if (!popoverText) {
+          popoverText = await page.evaluate(() => {
+            const elements = document.querySelectorAll('.ui-tooltip, .qtip, [class*="tooltip"]');
+            for (const el of elements) {
+              const rect = el.getBoundingClientRect();
+              if (rect.width > 0 && rect.height > 0) {
+                const text = el.innerText || '';
+                if ((text.includes('@') && text.includes('.')) || text.includes('+54')) {
+                  return text;
+                }
+              }
+            }
+            return '';
+          });
+        }
+        
+        if (popoverText) {
+          logger.debug(`Popover text for ${contactName}: ${popoverText.substring(0, 100)}`);
+          
+          // Extract email - look for pattern like email@domain.com
+          const emailMatch = popoverText.match(/[\w.-]+@[\w.-]+\.\w+/);
+          if (emailMatch) {
+            email = emailMatch[0].trim();
+          }
+          
+          // Extract phones - look for patterns with + or digits
+          // Argentine phone formats:
+          // - Landline: +54 XXX XXXXXXX (no 9 after country code)
+          // - Cell: +549 XXX XXXXXXX (has 9 after country code 54)
+          const phoneMatches = popoverText.match(/\+?\d[\d\s()-]{8,}/g) || [];
+          
+          for (const phoneMatch of phoneMatches) {
+            const cleanPhone = phoneMatch.replace(/[^+\d]/g, '');
+            
+            // Check if it's a cell phone: has "549" pattern (54 + 9 for mobile)
+            // The 9 must come right after 54 to be a cell phone
+            const isCellPhone = /^\+?549/.test(cleanPhone);
+            
+            if (isCellPhone) {
+              if (!cellPhone) cellPhone = cleanPhone;
+            } else {
+              if (!phone) phone = cleanPhone;
+            }
+          }
+          
+          logger.debug(`Extracted contact info for ${contactName}:`, { email, phone, cellPhone });
+        } else {
+          logger.debug(`No popover text found for ${contactName}`);
+        }
+        
+      } catch (popoverError) {
+        logger.debug(`Could not extract contact info: ${popoverError.message}`);
+      }
+      
+      // Close the popover by pressing Escape or clicking outside
+      await page.keyboard.press('Escape');
+      await page.waitForTimeout(200);
+      
+      return { email, phone, cellPhone };
+    }
+    
+    logger.debug(`Contact element not visible for: ${contactName}`);
+    return { email: null, phone: null, cellPhone: null };
+  } catch (error) {
+    logger.error(`Error extracting contact details for lead ${index + 1}`, { error: error.message });
+    return { email: null, phone: null, cellPhone: null };
+  }
+}
+
+/**
  * Extract property details by clicking on the property link and reading the modal
  * @param {Page} page - Playwright page
  * @param {Object} lead - Lead object with propertyAddress
@@ -918,7 +1050,7 @@ export async function scrapeLeadsUntilDate(page, targetDate, options = {}) {
       leadsToProcess.push({ lead, key, leadDate });
     }
     
-    // Now extract property details only for leads within date range
+    // Now extract property and contact details only for leads within date range
     logger.info(`Processing ${leadsToProcess.length} leads, extractDetails: ${extractDetails}`);
     
     for (const { lead, key, leadDate } of leadsToProcess) {
@@ -928,21 +1060,50 @@ export async function scrapeLeadsUntilDate(page, targetDate, options = {}) {
         break;
       }
       
-      let finalLead = lead;
+      let propertyId = null;
+      let propertyAgent = null;
+      let contactInfo = { email: null, phone: null, cellPhone: null };
       
       if (extractDetails) {
         logger.info(`Extracting details for: ${lead.contactName}`);
-        finalLead = await extractPropertyDetails(page, lead, allLeads.size);
-        logger.info(`Extracted - propertyId: ${finalLead.propertyId}, agent: ${finalLead.propertyAgent}`);
+        
+        // Extract property details
+        const leadWithProperty = await extractPropertyDetails(page, lead, allLeads.size);
+        propertyId = leadWithProperty.propertyId;
+        propertyAgent = leadWithProperty.propertyAgent;
+        
+        // Extract contact details (email, phones)
+        contactInfo = await extractContactDetails(page, lead, allLeads.size);
+        
+        logger.info(`Extracted - propertyId: ${propertyId}, agent: ${propertyAgent}, email: ${contactInfo.email}`);
       }
 
-      // Remove internal _agentName from final result
-      const { _agentName, ...leadData } = finalLead;
-      allLeads.set(key, {
-        ...leadData,
+      // Structure the lead data with organized sections
+      const structuredLead = {
+        // Contact info section
+        contact: {
+          name: lead.contactName || null,
+          email: contactInfo.email,
+          phone: contactInfo.phone,
+          cellPhone: contactInfo.cellPhone,
+        },
+        // Agent info section
+        agent: {
+          name: propertyAgent || lead._agentName || null,
+        },
+        // Property info section
+        property: {
+          id: propertyId,
+          address: lead.propertyAddress || null,
+        },
+        // Metadata
+        status: lead.status || null,
+        lastUpdated: lead.lastUpdated || null,
         parsedDate: leadDate?.toISOString() || null,
         scrapedAt: new Date().toISOString(),
-      });
+      };
+      
+      allLeads.set(key, structuredLead);
     }
 
     if (reachedTargetDate) break;
@@ -971,11 +1132,27 @@ export async function scrapeLeadsUntilDate(page, targetDate, options = {}) {
         if (!allLeads.has(key)) {
           const leadDate = parseDate(lead.vigencia || lead.lastUpdated);
           if (!leadDate || leadDate >= targetDate) {
-            allLeads.set(key, {
-              ...lead,
+            // Structure the lead data (without full details extraction at end of scroll)
+            const structuredLead = {
+              contact: {
+                name: lead.contactName || null,
+                email: null,
+                phone: null,
+                cellPhone: null,
+              },
+              agent: {
+                name: lead._agentName || null,
+              },
+              property: {
+                id: null,
+                address: lead.propertyAddress || null,
+              },
+              status: lead.status || null,
+              lastUpdated: lead.lastUpdated || null,
               parsedDate: leadDate?.toISOString() || null,
               scrapedAt: new Date().toISOString(),
-            });
+            };
+            allLeads.set(key, structuredLead);
           }
         }
       }
