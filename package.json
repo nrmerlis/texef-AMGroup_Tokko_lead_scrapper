@@ -1,0 +1,35 @@
+{
+  "name": "tokko-lead-scraper",
+  "version": "1.0.0",
+  "description": "API service to scrape leads from Tokko Broker CRM",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "scrape": "node src/scraper/index.js"
+  },
+  "keywords": [
+    "tokko",
+    "scraper",
+    "leads",
+    "openai",
+    "playwright",
+    "smart-selector"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "openai": "^4.70.0",
+    "playwright": "^1.48.0",
+    "winston": "^3.14.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
