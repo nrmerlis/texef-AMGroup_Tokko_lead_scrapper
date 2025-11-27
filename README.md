@@ -77,18 +77,31 @@ Inicia un trabajo de scraping.
 ```json
 {
   "targetDate": "2024-01-01",
-  "status": "pendiente_contactar",
+  "status": "para_reasignacion",
   "maxLeads": 100,
   "extractDetails": true
 }
 ```
 
-| Campo | Tipo | Requerido | Descripción |
-|-------|------|-----------|-------------|
-| `targetDate` | string | ✅ | Fecha límite (YYYY-MM-DD). Deja de scrapear al llegar a leads más antiguos |
-| `status` | string | ❌ | Estado a filtrar: `para_reasignacion`, `sin_seguimiento`, `pendiente_contactar`, `esperando_respuesta`, `evolucionando`, `tomar_accion`, `congelado`, `all` |
-| `maxLeads` | number | ❌ | Máximo de leads a scrapear (default: 10000) |
-| `extractDetails` | boolean | ❌ | Si extraer propertyId y propertyAgent del modal (default: false) |
+| Campo | Tipo | Requerido | Default | Descripción |
+|-------|------|-----------|---------|-------------|
+| `targetDate` | string | ✅ | - | Fecha límite (YYYY-MM-DD). Deja de scrapear al llegar a leads más antiguos |
+| `status` | string | ❌ | `pendiente_contactar` | Estado de leads a filtrar (ver opciones abajo) |
+| `maxLeads` | number | ❌ | `10000` | Máximo de leads a scrapear |
+| `extractDetails` | boolean | ❌ | `false` | Si extraer email, teléfono y celular del contacto (más lento pero más datos) |
+
+**Opciones de `status`:**
+
+| Valor | Descripción |
+|-------|-------------|
+| `para_reasignacion` | Leads pendientes de asignar a un agente |
+| `sin_seguimiento` | Leads sin seguimiento activo |
+| `pendiente_contactar` | Leads pendientes de primer contacto **(default)** |
+| `esperando_respuesta` | Leads esperando respuesta del cliente |
+| `evolucionando` | Leads en proceso de evolución/negociación |
+| `tomar_accion` | Leads que requieren acción inmediata |
+| `congelado` | Leads congelados/pausados |
+| `all` | Todos los leads sin filtrar por estado |
 
 **Response:**
 ```json
@@ -97,12 +110,21 @@ Inicia un trabajo de scraping.
   "data": {
     "leads": [
       {
-        "contactName": "Juan Pérez",
-        "propertyAgent": "María García",
-        "propertyAddress": "Colombres 148 2",
+        "contact": {
+          "name": "Juan Pérez",
+          "email": "juan@email.com",
+          "phone": "+541112345678",
+          "cellPhone": "+5491112345678"
+        },
+        "agent": {
+          "name": "María García"
+        },
+        "property": {
+          "id": "AAP123456",
+          "address": "Colombres 148 2"
+        },
         "lastUpdated": "15/01/2024 10:30",
-        "status": "Pendiente contactar",
-        "propertyId": "AAP123456"
+        "scrapedAt": "2024-01-20T10:30:00.000Z"
       }
     ],
     "metadata": {
@@ -112,6 +134,17 @@ Inicia un trabajo de scraping.
     }
   }
 }
+```
+
+**Ejemplo curl:**
+```bash
+curl -X POST http://localhost:3000/api/leads/scrape \
+  -H "Content-Type: application/json" \
+  -d '{
+    "targetDate": "2024-01-01",
+    "status": "pendiente_contactar",
+    "extractDetails": true
+  }'
 ```
 
 ### GET `/api/leads/health`

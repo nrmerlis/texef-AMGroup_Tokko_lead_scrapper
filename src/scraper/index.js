@@ -5,7 +5,10 @@ import {
   loginToTokko,
   saveSession,
 } from './auth.js';
-import { navigateToLeads, scrapeLeadsUntilDate, applyDateFilter } from './leads.js';
+import { navigateToLeads, scrapeLeadsUntilDate, applyDateFilter, SessionClosedError } from './leads.js';
+
+// Re-export SessionClosedError for use in route handlers
+export { SessionClosedError };
 
 /**
  * Main scraper function - orchestrates the entire scraping process
@@ -83,10 +86,14 @@ export async function scrapeLeads(options = {}) {
   } catch (error) {
     logger.error('Scraping failed', { error: error.message, stack: error.stack });
 
+    // Check if it's a session closed error
+    const isSessionClosed = error instanceof SessionClosedError || error.isSessionClosed;
+
     return {
       success: false,
       leads: [],
       error: error.message,
+      isSessionClosed,
     };
   } finally {
     // Always close the browser

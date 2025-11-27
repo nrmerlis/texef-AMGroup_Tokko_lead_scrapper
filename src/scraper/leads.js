@@ -10,6 +10,31 @@ import {
 } from './queries.js';
 
 /**
+ * Custom error for when the session is closed unexpectedly
+ * This happens when another user logs in with the same credentials
+ */
+export class SessionClosedError extends Error {
+  constructor(message = 'Sesión cerrada inesperadamente. Otro usuario se conectó con las mismas credenciales.') {
+    super(message);
+    this.name = 'SessionClosedError';
+    this.isSessionClosed = true;
+  }
+}
+
+/**
+ * Check if the session is still active by verifying we're not on the disconnected page
+ * @param {Page} page - Playwright page
+ * @throws {SessionClosedError} - If session was closed
+ */
+async function checkSessionActive(page) {
+  const currentUrl = page.url();
+  if (currentUrl.includes('/not_connected')) {
+    logger.error('Session closed - redirected to /not_connected');
+    throw new SessionClosedError();
+  }
+}
+
+/**
  * Wait for network to be idle with a maximum timeout
  * Tokko keeps connections open, so we can't wait indefinitely
  * @param {Page} page - Playwright page
@@ -22,8 +47,15 @@ async function waitForNetworkIdle(page, maxWait = 3000) {
       new Promise(resolve => setTimeout(resolve, maxWait))
     ]);
   } catch (e) {
-    // Ignore timeout errors
+    // Re-throw SessionClosedError
+    if (e instanceof SessionClosedError) {
+      throw e;
+    }
+    // Ignore other timeout errors
   }
+  
+  // Always check session after network operations
+  await checkSessionActive(page);
 }
 
 /**
@@ -55,11 +87,21 @@ export async function navigateToLeads(page) {
       timeout: 60000,
     });
 
+    // Check if session was closed during navigation
+    await checkSessionActive(page);
+
     // Wait for the page to fully load
     await waitForNetworkIdle(page);
 
+    // Verify session is still active after network operations
+    await checkSessionActive(page);
+
     logger.info('Navigated to Oportunidades section');
   } catch (error) {
+    // Re-throw SessionClosedError as-is
+    if (error instanceof SessionClosedError) {
+      throw error;
+    }
     logger.error('Failed to navigate to Oportunidades', { error: error.message });
     throw error;
   }
@@ -182,6 +224,10 @@ export async function enableReassignmentStatesToggle(page) {
       logger.warn('Could not find toggle to click');
     }
   } catch (error) {
+    // Re-throw SessionClosedError - don't swallow it
+    if (error instanceof SessionClosedError) {
+      throw error;
+    }
     logger.error('Failed to enable reassignment states toggle', { error: error.message });
   }
 }
@@ -283,6 +329,10 @@ export async function applyAllBranchesFilter(page) {
       logger.warn('Could not find "Aplicar" button');
     }
   } catch (error) {
+    // Re-throw SessionClosedError - don't swallow it
+    if (error instanceof SessionClosedError) {
+      throw error;
+    }
     logger.error('Failed to apply branch filter', { error: error.message });
   }
 }
@@ -444,11 +494,17 @@ const STATUS_SECTION_HEADERS = {
  */
 async function scrapeVisibleLeads(page, targetStatus = null) {
   try {
+    // Check session before scraping
+    await checkSessionActive(page);
+
     const leads = [];
     
     // Wait for leads table to be visible
     await page.waitForSelector('tr, [class*="row"]', { state: 'visible', timeout: 5000 }).catch(() => {});
     
+    // Check session after waiting
+    await checkSessionActive(page);
+
     // Get ALL table rows (both section headers and lead rows)
     const allRows = await page.locator('tr').all();
     
@@ -492,6 +548,10 @@ async function scrapeVisibleLeads(page, targetStatus = null) {
           leads.push(lead);
         }
       } catch (e) {
+        // Re-throw SessionClosedError, ignore other errors
+        if (e instanceof SessionClosedError) {
+          throw e;
+        }
         continue;
       }
     }
@@ -510,6 +570,10 @@ async function scrapeVisibleLeads(page, targetStatus = null) {
     logger.debug(`Found ${leads.length} visible leads in section "${targetStatus || 'all'}"`);
     return leads;
   } catch (error) {
+    // Re-throw SessionClosedError - don't swallow it
+    if (error instanceof SessionClosedError) {
+      throw error;
+    }
     logger.error('Error scraping visible leads', { error: error.message });
     return [];
   }
@@ -524,6 +588,9 @@ async function scrapeVisibleLeads(page, targetStatus = null) {
  */
 async function extractContactDetails(page, lead, index) {
   try {
+    // Check session before extracting
+    await checkSessionActive(page);
+
     const contactName = lead.contactName?.trim();
     if (!contactName) {
       logger.debug(`No contact name for lead ${index + 1}`);
@@ -642,6 +709,10 @@ async function extractContactDetails(page, lead, index) {
     logger.debug(`Contact element not visible for: ${contactName}`);
     return { email: null, phone: null, cellPhone: null };
   } catch (error) {
+    // Re-throw SessionClosedError - don't swallow it
+    if (error instanceof SessionClosedError) {
+      throw error;
+    }
     logger.error(`Error extracting contact details for lead ${index + 1}`, { error: error.message });
     return { email: null, phone: null, cellPhone: null };
   }
@@ -656,17 +727,13 @@ async function extractContactDetails(page, lead, index) {
  */
 async function extractPropertyDetails(page, lead, index) {
   try {
+    // Check session before extracting
+    await checkSessionActive(page);
     
     // Find the property link by matching the address text
     const propertyAddress = lead.propertyAddress?.replace(/\s*\+\s*$/, '').trim();
     if (!propertyAddress || propertyAddress === '+') {
       logger.debug(`No valid property address for lead ${index + 1}`);
-      return lead;
-    }
-    
-    // Skip "Similar a..." addresses - they don't open a modal, just an editable input
-    if (propertyAddress.toLowerCase().startsWith('similar a')) {
-      logger.debug(`Skipping "Similar a..." property for lead ${index + 1}: ${propertyAddress}`);
       return lead;
     }
     
@@ -682,14 +749,55 @@ async function extractPropertyDetails(page, lead, index) {
     }
     
     if (await propertyLink.isVisible({ timeout: 2000 }).catch(() => false)) {
-      // Click on the property link to open modal
+      // Click on the property link
       await propertyLink.click();
+      await page.waitForTimeout(500);
       
       let propertyId = null;
       let propertyAgent = null;
       
+      // Check what appeared after clicking:
+      // Option 1: A modal (#quickDisplay_modal) - real property exists
+      // Option 2: An editable input field - property doesn't exist (was reserved/deleted)
+      
+      // First, check if an input field appeared (indicates no real property)
+      const editableInputAppeared = await page.evaluate(() => {
+        // Look for a focused input or a recently visible input in the property area
+        const activeElement = document.activeElement;
+        if (activeElement && activeElement.tagName === 'INPUT' && activeElement.type === 'text') {
+          return true;
+        }
+        // Also check for any visible text input that might have appeared
+        const inputs = document.querySelectorAll('input[type="text"]:not([style*="display: none"])');
+        for (const input of inputs) {
+          const rect = input.getBoundingClientRect();
+          // Check if input is visible and in a reasonable position (not hidden)
+          if (rect.width > 50 && rect.height > 10 && rect.top > 0) {
+            // Check if this input appeared near where we clicked (property column area)
+            const style = window.getComputedStyle(input);
+            if (style.display !== 'none' && style.visibility !== 'hidden') {
+              return true;
+            }
+          }
+        }
+        return false;
+      });
+      
+      if (editableInputAppeared) {
+        // No real property - an editable input appeared instead of modal
+        logger.debug(`Property "${propertyAddress}" is editable (no real property) for lead ${index + 1}`);
+        // Close/blur the input by pressing Escape
+        await page.keyboard.press('Escape');
+        await page.waitForTimeout(200);
+        return {
+          ...lead,
+          propertyId: null,
+          propertyAgent: lead._agentName
+        };
+      }
+      
       try {
-        // Wait for modal to be visible (short timeout - if no modal, it's an editable field)
+        // Wait for modal to be visible (short timeout)
         await page.waitForSelector('#quickDisplay_modal', { state: 'visible', timeout: 2000 });
         
         // Get text from modal - content is usually in an iframe
@@ -739,10 +847,11 @@ async function extractPropertyDetails(page, lead, index) {
         }
         
       } catch (modalError) {
-        // Modal extraction failed, continue without property details
+        // Modal didn't appear - might be an editable field case we didn't catch
+        logger.debug(`No modal appeared for property "${propertyAddress}" - lead ${index + 1}`);
       }
       
-      // Close the modal
+      // Close the modal or any open element
       await page.keyboard.press('Escape');
       
       // Wait for modal to close completely
@@ -763,6 +872,10 @@ async function extractPropertyDetails(page, lead, index) {
       return lead;
     }
   } catch (error) {
+    // Re-throw SessionClosedError - don't swallow it
+    if (error instanceof SessionClosedError) {
+      throw error;
+    }
     logger.error(`Error extracting property details for lead ${index + 1}`, { error: error.message });
     return lead;
   }
@@ -854,6 +967,9 @@ function parseLeadFromText(text) {
  * @returns {Promise<Object>} - Scroll result info
  */
 async function scrollContainer(page, containerSelector = null) {
+  // Check session before scrolling
+  await checkSessionActive(page);
+
   const scrolled = await page.evaluate((selector) => {
     const possibleContainers = selector 
       ? [document.querySelector(selector)]
@@ -891,6 +1007,9 @@ async function scrollContainer(page, containerSelector = null) {
 
   // Wait for any lazy-loaded content after scroll
   await waitForNetworkIdle(page);
+
+  // Check session after network operations
+  await checkSessionActive(page);
 
   return scrolled;
 }
@@ -946,6 +1065,10 @@ export async function applyDateFilter(page, startDate, endDate) {
       logger.warn('Date filter dropdown not found');
     }
   } catch (error) {
+    // Re-throw SessionClosedError - don't swallow it
+    if (error instanceof SessionClosedError) {
+      throw error;
+    }
     logger.error('Failed to apply date filter', { error: error.message });
   }
 }
@@ -1023,6 +1146,9 @@ export async function scrapeLeadsUntilDate(page, targetDate, options = {}) {
     noNewLeadsCount < 5 &&
     !reachedTargetDate
   ) {
+    // Check session is still active at the start of each iteration
+    await checkSessionActive(page);
+
     const previousCount = allLeads.size;
 
     // First, scrape basic lead info (fast, no modal) - filter by status section
@@ -1097,9 +1223,7 @@ export async function scrapeLeadsUntilDate(page, targetDate, options = {}) {
           address: lead.propertyAddress || null,
         },
         // Metadata
-        status: lead.status || null,
         lastUpdated: lead.lastUpdated || null,
-        parsedDate: leadDate?.toISOString() || null,
         scrapedAt: new Date().toISOString(),
       };
       
@@ -1147,9 +1271,7 @@ export async function scrapeLeadsUntilDate(page, targetDate, options = {}) {
                 id: null,
                 address: lead.propertyAddress || null,
               },
-              status: lead.status || null,
               lastUpdated: lead.lastUpdated || null,
-              parsedDate: leadDate?.toISOString() || null,
               scrapedAt: new Date().toISOString(),
             };
             allLeads.set(key, structuredLead);
